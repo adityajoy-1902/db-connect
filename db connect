@@ -1,0 +1,1010 @@
+option-1 Basic
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+
+public class DatabaseConnectivityChecker {
+    
+    public static boolean isDatabaseListening(String url, String username) {
+        DatabaseInfo dbInfo = parseConnectionString(url);
+        
+        if (dbInfo == null) {
+            System.err.println("Could not parse database URL: " + url);
+            return false;
+        }
+        
+        // Test port connectivity
+        boolean portOpen = isPortOpen(dbInfo.getHost(), dbInfo.getPort(), 5000);
+        
+        if (portOpen) {
+            System.out.println("✅ " + dbInfo.getType() + " is listening on " + 
+                             dbInfo.getHost() + ":" + dbInfo.getPort());
+            
+            // Try to get more info without authentication
+            tryConnectionWithoutAuth(url, username, dbInfo);
+            
+            return true;
+        } else {
+            System.out.println("❌ " + dbInfo.getType() + " is not listening on " + 
+                             dbInfo.getHost() + ":" + dbInfo.getPort());
+            return false;
+        }
+    }
+    
+    private static boolean isPortOpen(String host, int port, int timeout) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), timeout);
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+    
+    private static void tryConnectionWithoutAuth(String url, String username, DatabaseInfo dbInfo) {
+        // Try connection with empty password or common defaults
+        String[] commonPasswords = {"", "password", "admin", username, "123456"};
+        
+        for (String password : commonPasswords) {
+            try (Connection conn = DriverManager.getConnection(url, username, password)) {
+                System.out.println("🔓 Successfully connected with default/empty password");
+                return;
+            } catch (SQLException e) {
+                // Check if it's authentication error (good - means DB is responsive)
+                if (isAuthenticationError(e)) {
+                    System.out.println("🔒 " + dbInfo.getType() + " is responsive (authentication required)");
+                    return;
+                }
+                // Other errors might indicate DB issues
+            }
+        }
+        
+        System.out.println("🔒 " + dbInfo.getType() + " is listening but requires authentication");
+    }
+    
+    private static boolean isAuthenticationError(SQLException e) {
+        String message = e.getMessage().toLowerCase();
+        return message.contains("access denied") || 
+               message.contains("authentication") || 
+               message.contains("login") ||
+               message.contains("password") ||
+               message.contains("ora-01017") || // Oracle invalid username/password
+               message.contains("ora-28000");   // Oracle account locked
+    }
+}
+
+
+
+option -2 Basic
+
+
+public class DatabaseInfo {
+    private String type;
+    private String host;
+    private int port;
+    private String database;
+    
+    // Constructors, getters, and setters
+    public DatabaseInfo(String type, String host, int port, String database) {
+        this.type = type;
+        this.host = host;
+        this.port = port;
+        this.database = database;
+    }
+    
+    // Getters
+    public String getType() { return type; }
+    public String getHost() { return host; }
+    public int getPort() { return port; }
+    public String getDatabase() { return database; }
+}
+
+public class DatabaseConnectivityChecker {
+    
+    public static DatabaseInfo parseConnectionString(String url) {
+        if (url.contains("mysql")) {
+            // jdbc:mysql://localhost:3306/dbname
+            String[] parts = url.split("//")[1].split("/");
+            String[] hostPort = parts[0].split(":");
+            String host = hostPort[0];
+            int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 3306;
+            String database = parts.length > 1 ? parts[1] : "";
+            return new DatabaseInfo("MySQL", host, port, database);
+            
+        } else if (url.contains("oracle")) {
+            // jdbc:oracle:thin:@localhost:1521:XE
+            String[] parts = url.split("@")[1].split(":");
+            String host = parts[0];
+            int port = Integer.parseInt(parts[1]);
+            String database = parts.length > 2 ? parts[2] : "";
+            return new DatabaseInfo("Oracle", host, port, database);
+            
+        } else if (url.contains("sqlserver")) {
+            // jdbc:sqlserver://localhost:1433;databaseName=dbname
+            String[] parts = url.split("//")[1].split(";")[0].split(":");
+            String host = parts[0];
+            int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 1433;
+            return new DatabaseInfo("MS SQL Server", host, port, "");
+        }
+        
+        return null;
+    }
+    
+    public static DatabaseStatus checkDatabaseConnectivity(String url, String username) {
+        DatabaseStatus status = new DatabaseStatus();
+        DatabaseInfo dbInfo = parseConnectionString(url);
+        
+        if (dbInfo == null) {
+            status.setConnected(false);
+            status.setErrorMessage("Could not parse database URL");
+            return status;
+        }
+        
+        status.setDatabaseType(dbInfo.getType());
+        
+        long startTime = System.currentTimeMillis();
+        
+        // Test port connectivity
+        boolean portOpen = isPortOpen(dbInfo.getHost(), dbInfo.getPort(), 5000);
+        status.setPortOpen(portOpen);
+        
+        if (!portOpen) {
+            status.setConnected(false);
+            status.setErrorMessage("Port " + dbInfo.getPort() + " is not open on " + dbInfo.getHost());
+            return status;
+        }
+        
+        // Test database-specific connectivity
+        status = testDatabaseSpecificConnectivity(url, username, dbInfo, status);
+        status.setConnectionTime(System.currentTimeMillis() - startTime);
+        
+        return status;
+    }
+    
+    private static DatabaseStatus testDatabaseSpecificConnectivity(String url, String username, 
+                                                                   DatabaseInfo dbInfo, DatabaseStatus status) {
+        
+        switch (dbInfo.getType()) {
+            case "MySQL":
+                return testMySQLConnectivity(url, username, status);
+            case "Oracle":
+                return testOracleConnectivity(url, username, status);
+            case "MS SQL Server":
+                return testMSSQLConnectivity(url, username, status);
+            default:
+                return testGenericConnectivity(url, username, status);
+        }
+    }
+    
+    private static DatabaseStatus testMySQLConnectivity(String url, String username, DatabaseStatus status) {
+        // Try with empty password first
+        try (Connection conn = DriverManager.getConnection(url, username, "")) {
+            status.setConnected(true);
+            status.setAuthenticated(true);
+            status.setMessage("Connected successfully with empty password");
+            return status;
+        } catch (SQLException e) {
+            if (e.getErrorCode() == 1045) { // Access denied
+                status.setConnected(true);
+                status.setAuthenticated(false);
+                status.setMessage("MySQL is responsive but requires authentication");
+            } else {
+                status.setConnected(false);
+                status.setErrorMessage("MySQL error: " + e.getMessage());
+            }
+        }
+        
+        return status;
+    }
+    
+    private static DatabaseStatus testOracleConnectivity(String url, String username, DatabaseStatus status) {
+        try (Connection conn = DriverManager.getConnection(url, username, "")) {
+            status.setConnected(true);
+            status.setAuthenticated(true);
+            status.setMessage("Connected successfully with empty password");
+            return status;
+        } catch (SQLException e) {
+            if (e.getErrorCode() == 1017 || e.getErrorCode() == 28000) { // Invalid username/password
+                status.setConnected(true);
+                status.setAuthenticated(false);
+                status.setMessage("Oracle is responsive but requires authentication");
+            } else {
+                status.setConnected(false);
+                status.setErrorMessage("Oracle error: " + e.getMessage());
+            }
+        }
+        
+        return status;
+    }
+    
+    private static DatabaseStatus testMSSQLConnectivity(String url, String username, DatabaseStatus status) {
+        try (Connection conn = DriverManager.getConnection(url, username, "")) {
+            status.setConnected(true);
+            status.setAuthenticated(true);
+            status.setMessage("Connected successfully with empty password");
+            return status;
+        } catch (SQLException e) {
+            if (e.getErrorCode() == 18456) { // Login failed
+                status.setConnected(true);
+                status.setAuthenticated(false);
+                status.setMessage("MS SQL Server is responsive but requires authentication");
+            } else {
+                status.setConnected(false);
+                status.setErrorMessage("MS SQL Server error: " + e.getMessage());
+            }
+        }
+        
+        return status;
+    }
+    
+    private static DatabaseStatus testGenericConnectivity(String url, String username, DatabaseStatus status) {
+        try (Connection conn = DriverManager.getConnection(url, username, "")) {
+            status.setConnected(true);
+            status.setAuthenticated(true);
+            status.setMessage("Connected successfully");
+            return status;
+        } catch (SQLException e) {
+            status.setConnected(true);
+            status.setAuthenticated(false);
+            status.setMessage("Database is responsive but requires authentication");
+        }
+        
+        return status;
+    }
+}
+
+
+OPTION -# BASIC
+
+
+public class DatabaseStatus {
+    private boolean connected;
+    private boolean authenticated;
+    private boolean portOpen;
+    private String databaseType;
+    private long connectionTime;
+    private String message;
+    private String errorMessage;
+    private String host;
+    private int port;
+    
+    // Getters and setters
+    public boolean isConnected() { return connected; }
+    public void setConnected(boolean connected) { this.connected = connected; }
+    
+    public boolean isAuthenticated() { return authenticated; }
+    public void setAuthenticated(boolean authenticated) { this.authenticated = authenticated; }
+    
+    public boolean isPortOpen() { return portOpen; }
+    public void setPortOpen(boolean portOpen) { this.portOpen = portOpen; }
+    
+    public String getDatabaseType() { return databaseType; }
+    public void setDatabaseType(String databaseType) { this.databaseType = databaseType; }
+    
+    public long getConnectionTime() { return connectionTime; }
+    public void setConnectionTime(long connectionTime) { this.connectionTime = connectionTime; }
+    
+    public String getMessage() { return message; }
+    public void setMessage(String message) { this.message = message; }
+    
+    public String getErrorMessage() { return errorMessage; }
+    public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+    
+    public String getHost() { return host; }
+    public void setHost(String host) { this.host = host; }
+    
+    public int getPort() { return port; }
+    public void setPort(int port) { this.port = port; }
+    
+    @Override
+    public String toString() {
+        return String.format("DatabaseStatus{type='%s', host='%s', port=%d, portOpen=%s, connected=%s, authenticated=%s, time=%dms, message='%s'}",
+                databaseType, host, port, portOpen, connected, authenticated, connectionTime, 
+                message != null ? message : errorMessage);
+    }
+}
+
+
+
+option 4 BASIC
+
+
+public class Main {
+    public static void main(String[] args) {
+        // Test databases without passwords
+        testDatabase("jdbc:mysql://localhost:3306/testdb", "root");
+        testDatabase("jdbc:oracle:thin:@localhost:1521:XE", "system");
+        testDatabase("jdbc:sqlserver://localhost:1433;databaseName=testdb", "sa");
+    }
+    
+    private static void testDatabase(String url, String username) {
+        System.out.println("Testing: " + url);
+        
+        // Simple connectivity check
+        boolean listening = DatabaseConnectivityChecker.isDatabaseListening(url, username);
+        System.out.println("Listening: " + listening);
+        
+        // Detailed status
+        DatabaseStatus status = DatabaseConnectivityChecker.checkDatabaseConnectivity(url, username);
+        System.out.println("Status: " + status);
+        System.out.println("---");
+    }
+}
+
+
+
+
+
+
+option -1
+
+
+
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+
+public class DatabaseConnectivityChecker {
+    
+    public static boolean isDatabaseListening(String url, String username) {
+        DatabaseInfo dbInfo = parseConnectionString(url);
+        
+        if (dbInfo == null) {
+            System.err.println("Could not parse database URL: " + url);
+            return false;
+        }
+        
+        // Test port connectivity
+        boolean portOpen = isPortOpen(dbInfo.getHost(), dbInfo.getPort(), 5000);
+        
+        if (portOpen) {
+            System.out.println("✅ " + dbInfo.getType() + " is listening on " + 
+                             dbInfo.getHost() + ":" + dbInfo.getPort());
+            
+            // Try to get more info without authentication
+            tryConnectionWithoutAuth(url, username, dbInfo);
+            
+            return true;
+        } else {
+            System.out.println("❌ " + dbInfo.getType() + " is not listening on " + 
+                             dbInfo.getHost() + ":" + dbInfo.getPort());
+            return false;
+        }
+    }
+    
+    private static boolean isPortOpen(String host, int port, int timeout) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), timeout);
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+    
+    private static void tryConnectionWithoutAuth(String url, String username, DatabaseInfo dbInfo) {
+        // Try connection with empty password or common defaults
+        String[] commonPasswords = {"", "password", "admin", username, "123456"};
+        
+        for (String password : commonPasswords) {
+            try (Connection conn = DriverManager.getConnection(url, username, password)) {
+                System.out.println("🔓 Successfully connected with default/empty password");
+                return;
+            } catch (SQLException e) {
+                // Check if it's authentication error (good - means DB is responsive)
+                if (isAuthenticationError(e)) {
+                    System.out.println("🔒 " + dbInfo.getType() + " is responsive (authentication required)");
+                    return;
+                }
+                // Other errors might indicate DB issues
+            }
+        }
+        
+        System.out.println("🔒 " + dbInfo.getType() + " is listening but requires authentication");
+    }
+    
+    private static boolean isAuthenticationError(SQLException e) {
+        String message = e.getMessage().toLowerCase();
+        return message.contains("access denied") || 
+               message.contains("authentication") || 
+               message.contains("login") ||
+               message.contains("password") ||
+               message.contains("ora-01017") || // Oracle invalid username/password
+               message.contains("ora-28000");   // Oracle account locked
+    }
+    
+    public static DatabaseInfo parseConnectionString(String url) {
+        if (url.contains("mysql")) {
+            // jdbc:mysql://localhost:3306/dbname
+            String[] parts = url.split("//")[1].split("/");
+            String[] hostPort = parts[0].split(":");
+            String host = hostPort[0];
+            int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 3306;
+            String database = parts.length > 1 ? parts[1] : "";
+            return new DatabaseInfo("MySQL", host, port, database);
+            
+        } else if (url.contains("oracle")) {
+            // jdbc:oracle:thin:@localhost:1521:XE
+            String[] parts = url.split("@")[1].split(":");
+            String host = parts[0];
+            int port = Integer.parseInt(parts[1]);
+            String database = parts.length > 2 ? parts[2] : "";
+            return new DatabaseInfo("Oracle", host, port, database);
+            
+        } else if (url.contains("sqlserver")) {
+            // jdbc:sqlserver://localhost:1433;databaseName=dbname
+            String[] parts = url.split("//")[1].split(";")[0].split(":");
+            String host = parts[0];
+            int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 1433;
+            return new DatabaseInfo("MS SQL Server", host, port, "");
+        }
+        
+        return null;
+    }
+    
+    public static class DatabaseInfo {
+        private String type;
+        private String host;
+        private int port;
+        private String database;
+        
+        public DatabaseInfo(String type, String host, int port, String database) {
+            this.type = type;
+            this.host = host;
+            this.port = port;
+            this.database = database;
+        }
+        
+        public String getType() { return type; }
+        public String getHost() { return host; }
+        public int getPort() { return port; }
+        public String getDatabase() { return database; }
+    }
+}
+
+
+
+
+
+
+
+
+option-2
+
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+
+public class DatabaseConnectivityChecker {
+    
+    public static class DatabaseInfo {
+        private String type;
+        private String host;
+        private int port;
+        private String database;
+        
+        public DatabaseInfo(String type, String host, int port, String database) {
+            this.type = type;
+            this.host = host;
+            this.port = port;
+            this.database = database;
+        }
+        
+        public String getType() { return type; }
+        public String getHost() { return host; }
+        public int getPort() { return port; }
+        public String getDatabase() { return database; }
+    }
+    
+    public static DatabaseInfo parseConnectionString(String url) {
+        if (url.contains("mysql")) {
+            // jdbc:mysql://localhost:3306/dbname
+            String[] parts = url.split("//")[1].split("/");
+            String[] hostPort = parts[0].split(":");
+            String host = hostPort[0];
+            int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 3306;
+            String database = parts.length > 1 ? parts[1] : "";
+            return new DatabaseInfo("MySQL", host, port, database);
+            
+        } else if (url.contains("oracle")) {
+            // jdbc:oracle:thin:@localhost:1521:XE
+            String[] parts = url.split("@")[1].split(":");
+            String host = parts[0];
+            int port = Integer.parseInt(parts[1]);
+            String database = parts.length > 2 ? parts[2] : "";
+            return new DatabaseInfo("Oracle", host, port, database);
+            
+        } else if (url.contains("sqlserver")) {
+            // jdbc:sqlserver://localhost:1433;databaseName=dbname
+            String[] parts = url.split("//")[1].split(";")[0].split(":");
+            String host = parts[0];
+            int port = parts.length > 1 ? Integer.parseInt(parts[1]) : 1433;
+            return new DatabaseInfo("MS SQL Server", host, port, "");
+        }
+        
+        return null;
+    }
+    
+    private static boolean isPortOpen(String host, int port, int timeout) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), timeout);
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+    
+    public static DatabaseStatus checkDatabaseConnectivity(String url, String username) {
+        DatabaseStatus status = new DatabaseStatus();
+        DatabaseInfo dbInfo = parseConnectionString(url);
+        
+        if (dbInfo == null) {
+            status.setConnected(false);
+            status.setErrorMessage("Could not parse database URL");
+            return status;
+        }
+        
+        status.setDatabaseType(dbInfo.getType());
+        status.setHost(dbInfo.getHost());
+        status.setPort(dbInfo.getPort());
+        
+        long startTime = System.currentTimeMillis();
+        
+        // Test port connectivity
+        boolean portOpen = isPortOpen(dbInfo.getHost(), dbInfo.getPort(), 5000);
+        status.setPortOpen(portOpen);
+        
+        if (!portOpen) {
+            status.setConnected(false);
+            status.setErrorMessage("Port " + dbInfo.getPort() + " is not open on " + dbInfo.getHost());
+            return status;
+        }
+        
+        // Test database-specific connectivity
+        status = testDatabaseSpecificConnectivity(url, username, dbInfo, status);
+        status.setConnectionTime(System.currentTimeMillis() - startTime);
+        
+        return status;
+    }
+    
+    private static DatabaseStatus testDatabaseSpecificConnectivity(String url, String username, 
+                                                                   DatabaseInfo dbInfo, DatabaseStatus status) {
+        
+        switch (dbInfo.getType()) {
+            case "MySQL":
+                return testMySQLConnectivity(url, username, status);
+            case "Oracle":
+                return testOracleConnectivity(url, username, status);
+            case "MS SQL Server":
+                return testMSSQLConnectivity(url, username, status);
+            default:
+                return testGenericConnectivity(url, username, status);
+        }
+    }
+    
+    private static DatabaseStatus testMySQLConnectivity(String url, String username, DatabaseStatus status) {
+        // Try with empty password first
+        try (Connection conn = DriverManager.getConnection(url, username, "")) {
+            status.setConnected(true);
+            status.setAuthenticated(true);
+            status.setMessage("Connected successfully with empty password");
+            return status;
+        } catch (SQLException e) {
+            if (e.getErrorCode() == 1045) { // Access denied
+                status.setConnected(true);
+                status.setAuthenticated(false);
+                status.setMessage("MySQL is responsive but requires authentication");
+            } else {
+                status.setConnected(false);
+                status.setErrorMessage("MySQL error: " + e.getMessage());
+            }
+        }
+        
+        return status;
+    }
+    
+    private static DatabaseStatus testOracleConnectivity(String url, String username, DatabaseStatus status) {
+        try (Connection conn = DriverManager.getConnection(url, username, "")) {
+            status.setConnected(true);
+            status.setAuthenticated(true);
+            status.setMessage("Connected successfully with empty password");
+            return status;
+        } catch (SQLException e) {
+            if (e.getErrorCode() == 1017 || e.getErrorCode() == 28000) { // Invalid username/password
+                status.setConnected(true);
+                status.setAuthenticated(false);
+                status.setMessage("Oracle is responsive but requires authentication");
+            } else {
+                status.setConnected(false);
+                status.setErrorMessage("Oracle error: " + e.getMessage());
+            }
+        }
+        
+        return status;
+    }
+    
+    private static DatabaseStatus testMSSQLConnectivity(String url, String username, DatabaseStatus status) {
+        try (Connection conn = DriverManager.getConnection(url, username, "")) {
+            status.setConnected(true);
+            status.setAuthenticated(true);
+            status.setMessage("Connected successfully with empty password");
+            return status;
+        } catch (SQLException e) {
+            if (e.getErrorCode() == 18456) { // Login failed
+                status.setConnected(true);
+                status.setAuthenticated(false);
+                status.setMessage("MS SQL Server is responsive but requires authentication");
+            } else {
+                status.setConnected(false);
+                status.setErrorMessage("MS SQL Server error: " + e.getMessage());
+            }
+        }
+        
+        return status;
+    }
+    
+    private static DatabaseStatus testGenericConnectivity(String url, String username, DatabaseStatus status) {
+        try (Connection conn = DriverManager.getConnection(url, username, "")) {
+            status.setConnected(true);
+            status.setAuthenticated(true);
+            status.setMessage("Connected successfully");
+            return status;
+        } catch (SQLException e) {
+            status.setConnected(true);
+            status.setAuthenticated(false);
+            status.setMessage("Database is responsive but requires authentication");
+        }
+        
+        return status;
+    }
+}
+
+
+
+
+
+
+option -3
+
+
+
+
+public class DatabaseStatus {
+    private boolean connected;
+    private boolean authenticated;
+    private boolean portOpen;
+    private String databaseType;
+    private long connectionTime;
+    private String message;
+    private String errorMessage;
+    private String host;
+    private int port;
+    
+    // Default constructor
+    public DatabaseStatus() {}
+    
+    // Constructor with basic info
+    public DatabaseStatus(String databaseType, String host, int port) {
+        this.databaseType = databaseType;
+        this.host = host;
+        this.port = port;
+    }
+    
+    // Getters and setters
+    public boolean isConnected() { return connected; }
+    public void setConnected(boolean connected) { this.connected = connected; }
+    
+    public boolean isAuthenticated() { return authenticated; }
+    public void setAuthenticated(boolean authenticated) { this.authenticated = authenticated; }
+    
+    public boolean isPortOpen() { return portOpen; }
+    public void setPortOpen(boolean portOpen) { this.portOpen = portOpen; }
+    
+    public String getDatabaseType() { return databaseType; }
+    public void setDatabaseType(String databaseType) { this.databaseType = databaseType; }
+    
+    public long getConnectionTime() { return connectionTime; }
+    public void setConnectionTime(long connectionTime) { this.connectionTime = connectionTime; }
+    
+    public String getMessage() { return message; }
+    public void setMessage(String message) { this.message = message; }
+    
+    public String getErrorMessage() { return errorMessage; }
+    public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+    
+    public String getHost() { return host; }
+    public void setHost(String host) { this.host = host; }
+    
+    public int getPort() { return port; }
+    public void setPort(int port) { this.port = port; }
+    
+    // Utility methods
+    public boolean isListening() {
+        return portOpen;
+    }
+    
+    public boolean isResponsive() {
+        return connected;
+    }
+    
+    public String getStatusSummary() {
+        if (!portOpen) {
+            return "NOT_LISTENING";
+        } else if (!connected) {
+            return "LISTENING_BUT_NOT_RESPONDING";
+        } else if (!authenticated) {
+            return "RESPONSIVE_NEEDS_AUTH";
+        } else {
+            return "FULLY_CONNECTED";
+        }
+    }
+    
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("DatabaseStatus{");
+        sb.append("type='").append(databaseType).append('\'');
+        sb.append(", host='").append(host).append('\'');
+        sb.append(", port=").append(port);
+        sb.append(", portOpen=").append(portOpen);
+        sb.append(", connected=").append(connected);
+        sb.append(", authenticated=").append(authenticated);
+        sb.append(", time=").append(connectionTime).append("ms");
+        sb.append(", status=").append(getStatusSummary());
+        
+        if (message != null) {
+            sb.append(", message='").append(message).append('\'');
+        }
+        if (errorMessage != null) {
+            sb.append(", error='").append(errorMessage).append('\'');
+        }
+        sb.append('}');
+        
+        return sb.toString();
+    }
+    
+    public void printDetailedStatus() {
+        System.out.println("=== Database Status Report ===");
+        System.out.println("Database Type: " + databaseType);
+        System.out.println("Host: " + host);
+        System.out.println("Port: " + port);
+        System.out.println("Port Open: " + (portOpen ? "✅ YES" : "❌ NO"));
+        System.out.println("Connected: " + (connected ? "✅ YES" : "❌ NO"));
+        System.out.println("Authenticated: " + (authenticated ? "✅ YES" : "🔒 NO"));
+        System.out.println("Connection Time: " + connectionTime + "ms");
+        System.out.println("Overall Status: " + getStatusSummary());
+        
+        if (message != null) {
+            System.out.println("Message: " + message);
+        }
+        if (errorMessage != null) {
+            System.out.println("Error: " + errorMessage);
+        }
+        System.out.println("===============================");
+    }
+}
+
+
+
+
+
+
+public class DatabaseConnectivityTester {
+    
+    public static void main(String[] args) {
+        // Test different database connections
+        System.out.println("=== Database Connectivity Tests ===\n");
+        
+        // Test MySQL
+        testDatabase("jdbc:mysql://localhost:3306/testdb", "root", "MySQL");
+        
+        // Test Oracle
+        testDatabase("jdbc:oracle:thin:@localhost:1521:XE", "system", "Oracle");
+        
+        // Test MS SQL Server
+        testDatabase("jdbc:sqlserver://localhost:1433;databaseName=testdb", "sa", "MS SQL Server");
+        
+        // Test remote databases
+        testDatabase("jdbc:mysql://34.123.45.67:3306/mydb", "appuser", "Remote MySQL");
+        testDatabase("jdbc:oracle:thin:@35.234.56.78:1521:XE", "appuser", "Remote Oracle");
+        
+        // Batch test multiple databases
+        System.out.println("\n=== Batch Database Test ===");
+        batchTestDatabases();
+        
+        // Continuous monitoring example
+        System.out.println("\n=== Continuous Monitoring (5 iterations) ===");
+        continuousMonitoring();
+    }
+    
+    private static void testDatabase(String url, String username, String description) {
+        System.out.println("Testing " + description + "...");
+        System.out.println("URL: " + url);
+        System.out.println("Username: " + username);
+        
+        // Method 1: Simple listening check
+        System.out.println("\n--- Simple Listening Check ---");
+        boolean listening = DatabaseConnectivityChecker.isDatabaseListening(url, username);
+        System.out.println("Result: " + (listening ? "LISTENING" : "NOT LISTENING"));
+        
+        // Method 2: Detailed status check
+        System.out.println("\n--- Detailed Status Check ---");
+        DatabaseStatus status = DatabaseConnectivityChecker.checkDatabaseConnectivity(url, username);
+        status.printDetailedStatus();
+        
+        System.out.println("\n" + "=".repeat(50) + "\n");
+    }
+    
+    private static void batchTestDatabases() {
+        String[][] databases = {
+            {"jdbc:mysql://localhost:3306/testdb", "root", "Local MySQL"},
+            {"jdbc:oracle:thin:@localhost:1521:XE", "system", "Local Oracle"},
+            {"jdbc:sqlserver://localhost:1433;databaseName=testdb", "sa", "Local MS SQL"},
+            {"jdbc:mysql://192.168.1.100:3306/testdb", "user", "Network MySQL"},
+            {"jdbc:oracle:thin:@192.168.1.101:1521:ORCL", "user", "Network Oracle"}
+        };
+        
+        for (String[] db : databases) {
+            String url = db[0];
+            String username = db[1];
+            String description = db[2];
+            
+            DatabaseStatus status = DatabaseConnectivityChecker.checkDatabaseConnectivity(url, username);
+            
+            System.out.printf("%-20s | %-15s | %-10s | %-15s | %4dms%n", 
+                description, 
+                status.getHost() + ":" + status.getPort(),
+                status.isListening() ? "LISTENING" : "NO",
+                status.getStatusSummary(),
+                status.getConnectionTime()
+            );
+        }
+    }
+    
+    private static void continuousMonitoring() {
+        String[] testUrls = {
+            "jdbc:mysql://localhost:3306/testdb",
+            "jdbc:oracle:thin:@localhost:1521:XE"
+        };
+        
+        String[] usernames = {"root", "system"};
+        
+        for (int i = 0; i < 5; i++) {
+            System.out.println("Check #" + (i + 1) + ":");
+            
+            for (int j = 0; j < testUrls.length; j++) {
+                DatabaseStatus status = DatabaseConnectivityChecker.checkDatabaseConnectivity(
+                    testUrls[j], usernames[j]
+                );
+                
+                System.out.printf("  %s: %s (%dms)%n", 
+                    status.getDatabaseType(),
+                    status.getStatusSummary(),
+                    status.getConnectionTime()
+                );
+            }
+            
+            // Wait 2 seconds between checks
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+    }
+}
+
+
+
+
+
+
+dependency
+
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    
+    <groupId>com.example</groupId>
+    <artifactId>db-connectivity-checker</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+    
+    <dependencies>
+        <!-- MySQL JDBC Driver -->
+        <dependency>
+            <groupId>mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>8.0.33</version>
+        </dependency>
+        
+        <!-- Oracle JDBC Driver -->
+        <dependency>
+            <groupId>com.oracle.database.jdbc</groupId>
+            <artifactId>ojdbc11</artifactId>
+            <version>21.9.0.0</version>
+        </dependency>
+        
+        <!-- MS SQL Server JDBC Driver -->
+        <dependency>
+            <groupId>com.microsoft.sqlserver</groupId>
+            <artifactId>mssql-jdbc</artifactId>
+            <version>12.4.1.jre11</version>
+        </dependency>
+    </dependencies>
+    
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>11</source>
+                    <target>11</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Clean and compile
+mvn clean compile
+
+# Run tests
+mvn test
+
+# Package the application
+mvn package
+
+# Run the application
+mvn exec:java
+
+# Create fat JAR with all dependencies
+mvn clean package
+
+# Run the fat JAR
+java -jar target/database-connectivity-checker-1.0.0.jar
+
+# Run with specific profile
+mvn clean package -P production
+
+# Update dependencies to latest versions
+mvn versions:display-dependency-updates
+
+# Run only with minimal dependencies
+mvn clean package -P minimal
