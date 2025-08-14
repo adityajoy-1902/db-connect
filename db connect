@@ -1213,3 +1213,192 @@ function updateDpgStatuses() {
   const pane = el.closest('.tab-pane[id^="app-"]');
   return { key: el.getAttribute('data-status-key'), paneId: pane && pane.id };
 })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ============================= dashboard.js =============================
+document.addEventListener('DOMContentLoaded', function () {
+  // ---------- Restart buttons (vanilla) ----------
+  document.querySelectorAll('.restart-btn').forEach(button => {
+    button.addEventListener('click', function () {
+      const serverInfo = {
+        appName: this.getAttribute('data-app-name'),
+        envName: this.getAttribute('data-env-name'),
+        ansibleUser: this.getAttribute('data-app-ansibleUser'),
+        ansibleController: this.getAttribute('data-app-ansibleController'),
+        serverName: this.getAttribute('data-server-name'),
+        serverIp: this.getAttribute('data-server-ip'),
+        serverOs: this.getAttribute('data-server-os'),
+        serviceName: this.getAttribute('data-service-name'),
+        serviceType: this.getAttribute('data-service-type'),
+        startupCmd: this.getAttribute('data-startup-cmd'),
+        startScript: this.getAttribute('data-start-script'),
+        ecosystem: this.getAttribute('data-env-ecosystem'),
+        user: this.getAttribute('data-service-user'),
+        db: this.getAttribute('data-service-db'),
+        dbType: this.getAttribute('data-service-dbType')
+      };
+      const becomeUser = this.getAttribute('data-become-user');
+      if (becomeUser) serverInfo.becomeUser = becomeUser;
+
+      const buttonContent = this.querySelector('.button-content');
+      const spinner = this.querySelector('.spinner-border');
+      if (buttonContent) buttonContent.classList.add('d-none');
+      if (spinner) spinner.classList.remove('d-none');
+      this.disabled = true;
+
+      fetch('/api/restart-service', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-TOKEN': (document.querySelector('input[name="_csrf"]') || {}).value || ''
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify(serverInfo)
+      })
+      .then(r => {
+        if (!r.ok) throw new Error('Network response was not ok');
+        return r.json();
+      })
+      .then(() => setTimeout(updateServiceStatuses, 1000))
+      .catch(err => {
+        console.error('Error:', err);
+        alert('Error sending restart command: ' + err.message);
+      })
+      .finally(() => {
+        if (buttonContent) buttonContent.classList.remove('d-none');
+        if (spinner) spinner.classList.add('d-none');
+        this.disabled = false;
+      });
+    });
+  });
+
+  // ---------- Start polling ----------
+  updateServiceStatuses();
+  setInterval(updateServiceStatuses, 5000);
+
+  updateDpgStatuses();
+  setInterval(updateDpgStatuses, 5000);
+});
+
+// ---------- Helpers ----------
+function appendAlertBadge(el) {
+  if (!el) return;
+  if (!el.querySelector('.tab-alert')) {
+    const badge = document.createElement('div');
+    badge.className = 'tab-alert';
+    badge.textContent = '!';
+    el.appendChild(badge);
+  }
+}
+
+// ---------- Main poller (NO jQuery, scoped env alerts) ----------
+function updateServiceStatuses() {
+  fetch('/api/service-statuses', { credentials: 'same-origin' })
+    .then(res => {
+      if (!res.ok) throw new Error('Failed to fetch statuses: ' + res.status);
+      return res.json();
+    })
+    .then(statuses => {
+      // 1) Clear previous visuals
+      document.querySelectorAll('.blinking-row').forEach(r => r.classList.remove('blinking-row'));
+      document.querySelectorAll('.tab-alert').forEach(a => a.remove());
+
+      // We'll collect DOWN services *scoped by each app pane*:
+      // Map<HTMLElement appPane, Set<string> envNamesDown>
+      const downByPane = new Map();
+      // Set<string paneId> to mark app tabs
+      const panesWithDown = new Set();
+
+      // 2) Walk all status entries. Keys are "App|Env|Server|Service"
+      for (const key in statuses) {
+        const info = statuses[key] || {};
+        const status = String(info.status || '').toLowerCase();
+        const parts = key.split('|'); // [app, env, server, service]
+        const appName = parts[0] || '';
+        const envName = parts[1] || '';
+
+        // Find the exact row for this key (your rows have data-status-key)
+        const row = document.querySelector(`.service-row[data-status-key="${key}"]`)
+               || document.querySelector(`[data-status-key="${cssAttr(key)}"]`);
+        // Identify which APP pane owns this row: id like "app-0", "app-1", ...
+        const appPane = row ? row.closest('.tab-pane[id^="app-"]') : null;
+
+        if (status === 'down') {
+          if (row) row.classList.add('blinking-row');
+          if (appPane) {
+            panesWithDown.add(appPane.id);
+            if (!downByPane.has(appPane)) downByPane.set(appPane, new Set());
+            downByPane.get(appPane).add(envName); // store env inside THIS app only
+          }
+        }
+
+        // Optional: inline indicator inside the cell
+        const cell = row || document.querySelector(`[data-status-key="${cssAttr(key)}"]`);
+        if (cell) {
+          let indicator = cell.querySelector('.status-indicator');
+          if (!indicator) {
+            indicator = document.createElement('span');
+            indicator.className = 'status-indicator';
+            cell.appendChild(indicator);
+          }
+          if (status === 'up') {
+            indicator.innerHTML = '<i class="fas fa-circle"></i> Up';
+            indicator.style.color = 'green';
+          } else if (status === 'down') {
+            indicator.innerHTML = '<i class="fas fa-circle"></i> Down';
+            indicator.style.color = 'red';
+          } else {
+            indicator.innerHTML = '<i class="fas fa-circle"></i> Unknown';
+            indicator.style.color = 'yellow';
+          }
+          indicator.title = info.ansibleOutput || '';
+        }
+      }
+
+      // 3) App-level badges: match app tab via data-bs-target="#app-X"
+      panesWithDown.forEach(paneId => {
+        document
+          .querySelectorAll(`#appTabs .nav-link[data-bs-target="#${cssAttr(paneId)}"]`)
+          .forEach(tab => appendAlertBadge(tab));
+      });
+
+      // 4) Env-level badges: ONLY inside the same app pane (prevents cross-app leaks)
+      downByPane.forEach((envSet, appPane) => {
+        envSet.forEach(envName => {
+          const envTab = appPane.querySelector(`.nav-link[data-env-name="${cssAttr(envName)}"]`);
+          if (envTab) appendAlertBadge(envTab);
+        });
+      });
+    })
+    .catch(err => console.error('Error updating service statuses:', err));
+}
+
+// Minimal attribute value escaper for selectors
+function cssAttr(v) {
+  // Use CSS.escape if available
+  if (window.CSS && CSS.escape) return CSS.escape(String(v));
+  return String(v).replace(/["\\]/g, '\\$&');
+}
+
+// Keep your existing DPG logic if needed
+function updateDpgStatuses() {
+  // no-op / stub
+}
+// =========================== end dashboard.js ===========================
