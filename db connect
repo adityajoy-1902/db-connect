@@ -1401,3 +1401,23 @@ function updateServiceStatuses() {
 function updateDpgStatuses() {
   // your existing DPG logic (unchanged)
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+({
+  appTabs: [...document.querySelectorAll('#appTabs .nav-link')].map(e => e.textContent.trim()),
+  someRows: [...document.querySelectorAll('[data-status-key]')].slice(0,5).map(e => e.getAttribute('data-status-key')),
+  envLinksFound: [...document.querySelectorAll('.nav-link[data-env-name]')].map(e => ({text: e.textContent.trim(), env: e.getAttribute('data-env-name')}))
+})
