@@ -1232,7 +1232,7 @@ document.addEventListener('DOMContentLoaded', function () {
         ecosystem: this.getAttribute('data-env-ecosystem'),
         user: this.getAttribute('data-service-user'),
         db: this.getAttribute('data-service-db'),
-        dbType: this.getAttribute('data-service-dbType')
+        dbType: this.getAttribute('data-service-dbType'),
       };
 
       const becomeUser = this.getAttribute('data-become-user');
@@ -1275,6 +1275,55 @@ document.addEventListener('DOMContentLoaded', function () {
   setInterval(updateDpgStatuses, 5000);
 });
 
+/* ---------- Helpers (no .env-tab dependency) ---------- */
+
+// Robust CSS.escape fallback
+function cssEscape(str) {
+  if (window.CSS && CSS.escape) return CSS.escape(str);
+  return String(str).replace(/["\\]/g, '\\$&');
+}
+
+// Find the <a> for an APP tab by its visible text (in #appTabs)
+function findAppTabByName(appName) {
+  const tabs = document.querySelectorAll('#appTabs .nav-link');
+  for (const t of tabs) {
+    if (t.textContent.trim() === appName) return t;
+  }
+  return null;
+}
+
+// From any service row in an app, walk up to that app's tab-pane container.
+// Then find the env tab inside that same pane by [data-env-name].
+function findEnvTabInAppPane(appName, envName) {
+  // Find a row that belongs to this app|env to locate the correct pane
+  const row = document.querySelector(
+    `[data-status-key^="${cssEscape(appName)}|${cssEscape(envName)}|"]`
+  ) || document.querySelector(
+    `.service-row[data-app-name="${cssEscape(appName)}"][data-env-name="${cssEscape(envName)}"]`
+  );
+
+  // If we can't find a row, fall back to any env tab with this name
+  if (!row) {
+    return document.querySelector(`.nav-link[data-env-name="${cssEscape(envName)}"]`);
+  }
+
+  const pane = row.closest('.tab-pane') || document;
+  return pane.querySelector(`.nav-link[data-env-name="${cssEscape(envName)}"]`)
+      || document.querySelector(`.nav-link[data-env-name="${cssEscape(envName)}"]`);
+}
+
+function appendAlertBadge(el) {
+  if (!el) return;
+  if (!el.querySelector('.tab-alert')) {
+    const alert = document.createElement('div');
+    alert.className = 'tab-alert';
+    alert.textContent = '!';
+    el.appendChild(alert);
+  }
+}
+
+/* ----------------- Status Poller ----------------- */
+
 function updateServiceStatuses() {
   fetch('/api/service-statuses')
     .then(res => {
@@ -1282,38 +1331,35 @@ function updateServiceStatuses() {
       return res.json();
     })
     .then(statuses => {
-      // Clear old visuals
+      // Clear previous visuals
       document.querySelectorAll('.blinking-row').forEach(row => row.classList.remove('blinking-row'));
       document.querySelectorAll('.tab-alert').forEach(alert => alert.remove());
 
-      // Track only DOWN items
-      const environmentsWithDownServices = new Set(); // keys: "App|Env"
-      const applicationsWithDownServices = new Set(); // keys: "App"
+      const appsWithDown = new Set();       // "App"
+      const appEnvWithDown = new Set();     // "App|Env"
 
+      // Iterate over "app|env|server|service" keys
       for (const key in statuses) {
         const statusObj = statuses[key] || {};
         const status = String(statusObj.status || '').toLowerCase();
 
-        // Blink the exact row when DOWN
-        if (status === 'down') {
-          const row = document.querySelector(`.service-row[data-status-key="${key}"]`);
+        const parts = key.split('|'); // [app, env, server, service]
+        const appName = parts[0] || '';
+        const envName = parts[1] || '';
+        const isDown = status === 'down';
+
+        // Blink only the exact row for DOWN
+        if (isDown) {
+          const row = document.querySelector(`.service-row[data-status-key="${key}"]`)
+            || document.querySelector(
+                 `.service-row[data-app-name="${cssEscape(appName)}"][data-env-name="${cssEscape(envName)}"]`
+               );
           if (row) row.classList.add('blinking-row');
+          appsWithDown.add(appName);
+          appEnvWithDown.add(`${appName}|${envName}`);
         }
 
-        // Parse key: app|env|server|service
-        const parts = key.split('|');
-        if (parts.length >= 2) {
-          const appName = parts[0];
-          const envName = parts[1];
-
-          // FIX: only add to sets when this service is actually DOWN
-          if (status === 'down') {                                // <-- FIX #1
-            environmentsWithDownServices.add(`${appName}|${envName}`);
-            applicationsWithDownServices.add(appName);
-          }
-        }
-
-        // Status text bubble in cell (optional)
+        // Optional: inline indicator
         const cell = document.querySelector(`[data-status-key="${key}"]`);
         if (cell) {
           let indicator = cell.querySelector('.status-indicator');
@@ -1325,7 +1371,7 @@ function updateServiceStatuses() {
           if (status === 'up') {
             indicator.innerHTML = '<i class="fas fa-circle"></i> Up';
             indicator.style.color = 'green';
-          } else if (status === 'down') {
+          } else if (isDown) {
             indicator.innerHTML = '<i class="fas fa-circle"></i> Down';
             indicator.style.color = 'red';
           } else {
@@ -1336,46 +1382,22 @@ function updateServiceStatuses() {
         }
       }
 
-      // Render env alerts scoped by App|Env
-      environmentsWithDownServices.forEach(key => {
+      // App-level badge (by visible text match in #appTabs)
+      appsWithDown.forEach(appName => {
+        const appTab = findAppTabByName(appName);
+        if (appTab) appendAlertBadge(appTab);
+      });
+
+      // Env-level badge, scoped to the same app's pane
+      appEnvWithDown.forEach(key => {
         const [appName, envName] = key.split('|');
-        document
-          .querySelectorAll(`.env-tab[data-app-name="${cssEscape(appName)}"][data-env-name="${cssEscape(envName)}"]`)
-          .forEach(tab => appendAlertBadge(tab));
+        const envTab = findEnvTabInAppPane(appName, envName);
+        if (envTab) appendAlertBadge(envTab);
       });
-
-      // Render app alerts
-      applicationsWithDownServices.forEach(appName => {
-        document
-          .querySelectorAll(`.app-tab[data-app-name="${cssEscape(appName)}"]`)
-          .forEach(tab => appendAlertBadge(tab));
-      });
-
-      // (Optional) quick debug: see what was marked
-      // console.log('envWithDown:', [...environmentsWithDownServices]);
-      // console.log('appsWithDown:', [...applicationsWithDownServices]);
     })
-    .catch(error => {
-      console.error('Error updating service statuses:', error);
-    });
-}
-
-function appendAlertBadge(tab) {
-  if (!tab.querySelector('.tab-alert')) {
-    const alert = document.createElement('div');
-    alert.className = 'tab-alert';
-    alert.textContent = '!';
-    tab.appendChild(alert);
-  }
-}
-
-// FIX: safe escaping for attribute selectors (in case app/env have spaces, dots, etc.)
-function cssEscape(str) {
-  if (window.CSS && CSS.escape) return CSS.escape(str);
-  // minimal fallback
-  return String(str).replace(/"/g, '\\"');
+    .catch(err => console.error('Error updating service statuses:', err));
 }
 
 function updateDpgStatuses() {
-  // keep your existing DPG logic here (unchanged)
+  // your existing DPG logic (unchanged)
 }
